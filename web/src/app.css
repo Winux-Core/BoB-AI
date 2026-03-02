@@ -1,0 +1,32 @@
+:root {
+  --bg-0: #070d16;
+  --bg-1: #0d1624;
+  --ink-0: #eaf2ff;
+  --ink-1: #9eb2ca;
+  --accent: #74a8e6;
+  --accent-2: #74cfa8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: "Space Grotesk", "Manrope", "Avenir Next", "Segoe UI", sans-serif;
+  color: var(--ink-0);
+  background:
+    radial-gradient(circle at 14% 20%, rgba(63, 101, 156, 0.42) 0%, transparent 36%),
+    radial-gradient(circle at 82% 8%, rgba(43, 117, 92, 0.3) 0%, transparent 30%),
+    linear-gradient(150deg, var(--bg-0), var(--bg-1));
+}
+
+code,
+pre {
+  font-family: "IBM Plex Mono", "Cascadia Code", "Consolas", monospace;
+}

@@ -1,0 +1,14 @@
+[package]
+name = "bob-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "bob-cli"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+bob-core.workspace = true
+clap.workspace = true
+serde_json.workspace = true

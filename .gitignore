@@ -1,0 +1,24 @@
+# Rust
+/target/
+api/target/
+cli/target/
+desktop/target/
+crates/*/target/
+
+# Node
+node_modules/
+web/.svelte-kit/
+web/build/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+
+# OS/editor
+.DS_Store
+*.swp

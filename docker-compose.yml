@@ -1,0 +1,56 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bob
+      POSTGRES_PASSWORD: bob
+      POSTGRES_DB: bob
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bob"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_models:/root/.ollama
+    ports:
+      - "11434:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  bob-api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    environment:
+      BOB_API_BIND: "0.0.0.0:8787"
+      BOB_API_TOKEN: ${BOB_API_TOKEN:-}
+      BOB_POSTGRES_URL: "postgres://bob:bob@postgres:5432/bob"
+      BOB_OLLAMA_URL: "http://ollama:11434"
+      BOB_ALLOWED_ROOTS: "/data"
+      BOB_POLICY_SYNC_FROM_DB: "false"
+    command: ["--allow-no-auth"]
+    ports:
+      - "8787:8787"
+    volumes:
+      - bob_data:/data
+
+volumes:
+  pgdata:
+  ollama_models:
+  bob_data:

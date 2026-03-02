@@ -1,0 +1,14 @@
+{
+  "name": "bob",
+  "private": true,
+  "scripts": {
+    "dev": "npm run --prefix web dev",
+    "build": "npm run --prefix web build",
+    "preview": "npm run --prefix web preview",
+    "tauri:dev": "npx tauri dev",
+    "tauri:build": "npx tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

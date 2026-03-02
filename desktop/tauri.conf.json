@@ -1,0 +1,28 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "BoB",
+  "version": "0.1.0",
+  "identifier": "com.bob.desktop",
+  "build": {
+    "beforeDevCommand": "npm run --prefix ../web dev",
+    "beforeBuildCommand": "npm run --prefix ../web build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../web/build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "BoB Assistant",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 620,
+        "resizable": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all"
+  }
+}
