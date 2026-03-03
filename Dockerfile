@@ -7,8 +7,9 @@ COPY api/ api/
 COPY cli/ cli/
 COPY crates/ crates/
 
-# Desktop/Tauri requires system GTK libs we don't need in the container,
-# so only build api + cli.
+# Exclude desktop (Tauri) from the workspace for this build
+RUN sed -i 's/, "desktop"//' Cargo.toml
+
 RUN cargo build --release --package bob-api --package bob-cli
 
 FROM debian:bookworm-slim

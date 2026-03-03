@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.bob.desktop",
   "build": {
-    "beforeDevCommand": "npm run --prefix ../web dev",
-    "beforeBuildCommand": "npm run --prefix ../web build",
+    "beforeDevCommand": "npm run --prefix web dev",
+    "beforeBuildCommand": "npm run --prefix web build",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../web/build"
   },

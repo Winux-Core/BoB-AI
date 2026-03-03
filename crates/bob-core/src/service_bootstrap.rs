@@ -1,4 +1,5 @@
 use anyhow::Result;
+use tracing::info;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RetryConfig {
@@ -30,11 +31,11 @@ pub fn wait_for_postgres(label: &str, url: &str, retry: RetryConfig) -> Result<(
     for attempt in 1..=retry.max_attempts {
         match std::net::TcpStream::connect(extract_host_port(url, 5432)) {
             Ok(_) => {
-                println!("{}: postgres reachable (attempt {})", label, attempt);
+                info!(label, attempt, "postgres reachable");
                 return Ok(());
             }
             Err(_) if attempt < retry.max_attempts => {
-                println!("{}: waiting for postgres (attempt {}/{})", label, attempt, retry.max_attempts);
+                info!(label, attempt, max = retry.max_attempts, "waiting for postgres");
                 std::thread::sleep(std::time::Duration::from_millis(retry.delay_ms));
             }
             Err(e) => {
@@ -56,11 +57,11 @@ pub fn wait_for_http_health(
     for attempt in 1..=retry.max_attempts {
         match ureq::get(&url).call() {
             Ok(_) => {
-                println!("{}: healthy at {} (attempt {})", label, url, attempt);
+                info!(label, %url, attempt, "service healthy");
                 return Ok(());
             }
             Err(_) if attempt < retry.max_attempts => {
-                println!("{}: waiting for {} (attempt {}/{})", label, url, attempt, retry.max_attempts);
+                info!(label, %url, attempt, max = retry.max_attempts, "waiting for service");
                 std::thread::sleep(std::time::Duration::from_millis(retry.delay_ms));
             }
             Err(e) => {

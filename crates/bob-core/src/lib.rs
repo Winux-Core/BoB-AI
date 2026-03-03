@@ -2,6 +2,7 @@ pub mod config;
 pub mod db_manager;
 pub mod db_migrations;
 pub mod db_policy;
+pub mod error;
 pub mod fs_cache;
 pub mod fs_watch;
 pub mod ollama;

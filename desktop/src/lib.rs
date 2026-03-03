@@ -280,6 +280,58 @@ fn list_cached_chats_cmd() -> Result<Vec<CachedChatSummary>, String> {
     Ok(output)
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ApiConnectionStatus {
+    reachable: bool,
+    url: String,
+    error: Option<String>,
+}
+
+#[tauri::command]
+fn test_api_connection_cmd(api_base_url: String, api_token: Option<String>) -> ApiConnectionStatus {
+    let url = format!("{}/healthz", api_base_url.trim_end_matches('/'));
+    let mut req = ureq::get(&url);
+    if let Some(token) = normalize_optional_token(api_token) {
+        req = req.set("x-api-key", &token);
+    }
+    match req.call() {
+        Ok(_) => ApiConnectionStatus {
+            reachable: true,
+            url: api_base_url,
+            error: None,
+        },
+        Err(e) => ApiConnectionStatus {
+            reachable: false,
+            url: api_base_url,
+            error: Some(map_ureq_error(e)),
+        },
+    }
+}
+
+#[tauri::command]
+fn auto_discover_api_cmd() -> ApiConnectionStatus {
+    let candidates = [
+        "http://127.0.0.1:8787",
+        "http://localhost:8787",
+        "http://0.0.0.0:8787",
+    ];
+    for base_url in candidates {
+        let url = format!("{}/healthz", base_url);
+        if let Ok(_) = ureq::get(&url).timeout(std::time::Duration::from_secs(2)).call() {
+            return ApiConnectionStatus {
+                reachable: true,
+                url: base_url.to_string(),
+                error: None,
+            };
+        }
+    }
+    ApiConnectionStatus {
+        reachable: false,
+        url: candidates[0].to_string(),
+        error: Some("No BoB API found on local ports. Configure a remote URL in Settings.".to_string()),
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -293,7 +345,9 @@ pub fn run() {
             sync_chat_cache_cmd,
             save_cached_chat_cmd,
             load_cached_chat_cmd,
-            list_cached_chats_cmd
+            list_cached_chats_cmd,
+            test_api_connection_cmd,
+            auto_discover_api_cmd
         ])
         .run(tauri::generate_context!())
         .expect("error while running BoB desktop application");

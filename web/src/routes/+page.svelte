@@ -3,6 +3,8 @@
   import {
     invokeDesktop,
     isTauri,
+    streamConversationReply,
+    type ApiConnectionStatus,
     type CachedChatSummary,
     type ConversationRecord,
     type LocalProfile,
@@ -66,8 +68,12 @@
   let newChatModalOpen = false;
   let logsModalOpen = false;
   let debugLogs: DebugLogEntry[] = [];
+  let apiConnected = false;
+  let apiConnectionError = "";
 
   let threadEl: HTMLDivElement | null = null;
+  let activeStream: { abort: () => void } | null = null;
+  let streamingContent = "";
 
   $: hasToken = profile.settings.api_token.trim().length > 0;
   $: sidebarItems = buildSidebarItems(conversations, cachedChats);
@@ -154,6 +160,39 @@
     profile = await invokeDesktop<LocalProfile>("save_local_profile_cmd", { profile });
     status = "Saved profile to ~/.config/BoB.";
     logEvent("info", "Saved local profile settings.");
+  };
+
+  const testConnection = async () => {
+    logEvent("info", "Testing API connection.", { url: profile.settings.api_base_url });
+    const result = await invokeDesktop<ApiConnectionStatus>("test_api_connection_cmd", {
+      apiBaseUrl: profile.settings.api_base_url,
+      apiToken: tokenOrNull()
+    });
+    apiConnected = result.reachable;
+    apiConnectionError = result.error ?? "";
+    if (result.reachable) {
+      status = `Connected to ${result.url}`;
+      logEvent("info", "API connection successful.", { url: result.url });
+    } else {
+      status = `Cannot reach API: ${result.error}`;
+      logEvent("error", "API connection failed.", { url: result.url, error: result.error });
+    }
+  };
+
+  const autoDiscover = async () => {
+    logEvent("info", "Auto-discovering BoB API...");
+    const result = await invokeDesktop<ApiConnectionStatus>("auto_discover_api_cmd");
+    if (result.reachable) {
+      profile.settings.api_base_url = result.url;
+      apiConnected = true;
+      apiConnectionError = "";
+      status = `Auto-discovered API at ${result.url}`;
+      logEvent("info", "Auto-discovered BoB API.", { url: result.url });
+    } else {
+      apiConnected = false;
+      apiConnectionError = result.error ?? "Not found";
+      logEvent("warn", "Auto-discovery found no API.", { error: result.error });
+    }
   };
 
   const refreshConversations = async () => {
@@ -316,32 +355,70 @@
       hasSystem: Boolean(profile.settings.system_prompt.trim()),
       hasContextInjection: Boolean(profile.context_injection.trim())
     };
-    logEvent("info", "Sending message request.", outgoingMeta);
+    logEvent("info", "Sending streaming message request.", outgoingMeta);
 
-    const response = await invokeDesktop<ConversationReplyResponse>("api_send_message_cmd", {
-      apiBaseUrl: profile.settings.api_base_url,
-      apiToken: tokenOrNull(),
-      conversationId: selectedConversationId,
-      model: profile.settings.default_model,
-      message: outboundMessage,
-      system: profile.settings.system_prompt || null,
-      contextInjection: profile.context_injection || null,
-      personalization: parsePersonalization(),
-      historyLimit: 50
-    });
+    streamingContent = "";
 
-    messages = [...messages, response.user_message, response.assistant_message];
-    selectedConversationSource = "api";
-
-    await refreshConversations();
-    await syncCache();
-    await scrollThreadToBottom();
-    status = `Reply received from ${response.model_response.model}.`;
-    logEvent("info", "Received assistant response.", {
-      conversationId: response.conversation_id,
-      model: response.model_response.model,
-      responseChars: response.model_response.response.length,
-      done: response.model_response.done
+    await new Promise<void>((resolve, reject) => {
+      activeStream = streamConversationReply(
+        profile.settings.api_base_url,
+        tokenOrNull(),
+        selectedConversationId,
+        {
+          model: profile.settings.default_model,
+          message: outboundMessage,
+          system: profile.settings.system_prompt || null,
+          context_injection: profile.context_injection || null,
+          personalization: parsePersonalization(),
+          history_limit: 50
+        },
+        {
+          onMeta: (meta) => {
+            messages = [...messages, meta.user_message];
+            logEvent("info", "Stream started.", { model: meta.model });
+            scrollThreadToBottom();
+          },
+          onToken: (token) => {
+            streamingContent += token.token;
+            scrollThreadToBottom();
+          },
+          onStats: (stats) => {
+            logEvent("info", "Generation stats.", stats);
+          },
+          onDone: (done) => {
+            streamingContent = "";
+            messages = [...messages, done.assistant_message];
+            selectedConversationSource = "api";
+            activeStream = null;
+            logEvent("info", "Stream complete.", {
+              conversationId: selectedConversationId,
+              responseChars: done.assistant_message.content.length
+            });
+            refreshConversations().then(() => syncCache());
+            scrollThreadToBottom();
+            status = "Reply received.";
+            resolve();
+          },
+          onError: (error) => {
+            activeStream = null;
+            if (streamingContent) {
+              // Partial response - show what we got
+              const partial: MessageRecord = {
+                id: "partial",
+                conversation_id: selectedConversationId,
+                role: "assistant",
+                content: streamingContent + "\n\n[Stream interrupted]",
+                created_at: new Date().toISOString()
+              };
+              messages = [...messages, partial];
+              streamingContent = "";
+            }
+            logEvent("error", "Stream error.", { error });
+            status = `Stream error: ${error}`;
+            reject(new Error(error));
+          }
+        }
+      );
     });
   };
 
@@ -440,9 +517,13 @@
     await run(async () => {
       logEvent("info", "Initializing BoB workspace UI.");
       await loadProfile();
-      await refreshAll();
-      status = "Ready.";
-      logEvent("info", "Workspace UI ready.");
+      await autoDiscover();
+      await testConnection();
+      if (apiConnected) {
+        await refreshAll();
+      }
+      status = apiConnected ? "Ready." : `Not connected — configure API URL in Settings.`;
+      logEvent("info", "Workspace UI ready.", { apiConnected });
     });
   });
 
@@ -603,7 +684,12 @@
         {/each}
       {/if}
 
-      {#if busy}
+      {#if busy && streamingContent}
+        <article class="bubble assistant streaming">
+          <header>ASSISTANT</header>
+          <p>{streamingContent}<span class="cursor">|</span></p>
+        </article>
+      {:else if busy}
         <div class="typing">BoB is thinking...</div>
       {/if}
     </div>
@@ -616,10 +702,14 @@
         on:keydown={handleComposerKeydown}
       ></textarea>
       <div class="composer-actions">
-        <span class="status-dot" class:ok={hasToken}>{hasToken ? "API Token Set" : "No API Token"}</span>
+        <span class="status-dot" class:ok={apiConnected}>{apiConnected ? "Connected" : "Disconnected"}</span>
         <div class="actions-right">
           <button class="ghost" disabled={busy} on:click={clearComposer}>Clear</button>
-          <button class="primary" disabled={busy} on:click={() => run(sendMessage)}>Send</button>
+          {#if activeStream}
+            <button class="ghost" on:click={() => { activeStream?.abort(); activeStream = null; busy = false; status = "Stream aborted."; }}>Stop</button>
+          {:else}
+            <button class="primary" disabled={busy} on:click={() => run(sendMessage)}>Send</button>
+          {/if}
         </div>
       </div>
       <p class="status-line">{status}</p>
@@ -648,6 +738,16 @@
           API URL
           <input bind:value={profile.settings.api_base_url} />
         </label>
+        <div class="connection-row">
+          <span class="status-dot" class:ok={apiConnected}>{apiConnected ? "Connected" : "Disconnected"}</span>
+          {#if apiConnectionError}
+            <span class="connection-error">{apiConnectionError}</span>
+          {/if}
+          <div class="actions-right">
+            <button class="ghost" disabled={busy} on:click={() => run(autoDiscover)}>Auto-Discover</button>
+            <button class="ghost" disabled={busy} on:click={() => run(testConnection)}>Test Connection</button>
+          </div>
+        </div>
         <label>
           API Token
           <input type="password" bind:value={profile.settings.api_token} />
@@ -995,6 +1095,16 @@
     animation: pulse 1200ms ease-in-out infinite;
   }
 
+  .cursor {
+    animation: blink 600ms step-end infinite;
+    color: #8fd7c0;
+  }
+
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+
   .composer {
     border-top: 1px solid rgba(144, 164, 180, 0.14);
     padding: 0.75rem 0.8rem;
@@ -1027,6 +1137,23 @@
     border-color: rgba(115, 197, 157, 0.44);
     color: #95e3c0;
     background: rgba(30, 86, 70, 0.25);
+  }
+
+  .connection-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+
+  .connection-error {
+    font-size: 0.72rem;
+    color: #f1a8a8;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .actions-right {

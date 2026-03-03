@@ -6,6 +6,7 @@ use std::time::Instant;
 use anyhow::Result;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -19,13 +20,15 @@ use bob_core::db_policy::load_db_policy_rules;
 use bob_core::fs_cache::{FileEntry, FsIndex};
 use bob_core::fs_watch::{WatchSummary, watch_and_persist};
 use bob_core::ollama::{
-    OllamaGenerateResponse, generate as ollama_generate, list_models as ollama_list_models,
+    OllamaGenerateResponse, generate as ollama_generate,
+    generate_stream as ollama_generate_stream, list_models as ollama_list_models,
 };
 use bob_core::permissions::{PermissionDecision, PermissionEngine, PermissionRequest};
 use bob_core::service_bootstrap::{
     RetryConfig, require_non_empty_connection, wait_for_http_health, wait_for_postgres,
 };
 use clap::Parser;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::RwLock;
@@ -307,6 +310,12 @@ async fn main() -> Result<()> {
     wait_for_postgres("bob-api", &postgres_url, startup_retry)?;
     wait_for_http_health("ollama", &ollama_url, "/api/tags", None, startup_retry)?;
 
+    let migration_summary = apply_migrations(&postgres_url, &cfg.migrations_dir)?;
+    println!(
+        "migrations: applied={} skipped={} total={}",
+        migration_summary.applied, migration_summary.skipped, migration_summary.total
+    );
+
     let state = AppState {
         cfg: Arc::new(cfg.clone()),
         permission: Arc::new(RwLock::new(permission_engine)),
@@ -355,6 +364,10 @@ async fn main() -> Result<()> {
         .route(
             "/conversations/{id}/messages",
             get(get_conversation_messages).post(reply_conversation),
+        )
+        .route(
+            "/conversations/{id}/messages/stream",
+            post(reply_conversation_stream),
         )
         .with_state(state)
         .layer(cors);
@@ -969,6 +982,171 @@ async fn reply_conversation(
         assistant_message,
         model_response,
     }))
+}
+
+async fn reply_conversation_stream(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Json(req): Json<ConversationMessageRequest>,
+) -> Result<Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
+    require_api_auth(&state, &headers)?;
+    authorize_tool(&state, "conversation.reply", None, None).await?;
+
+    if req.message.trim().is_empty() {
+        return Err(ApiError::bad_request("message cannot be empty"));
+    }
+
+    // Resolve profile defaults
+    let should_load_profile = req
+        .model
+        .as_ref()
+        .map(|m| m.trim().is_empty())
+        .unwrap_or(true)
+        || req.system.is_none()
+        || req.context_injection.is_none()
+        || req.personalization.is_none();
+
+    let profile = if should_load_profile {
+        let manager = state.db_manager.clone();
+        Some(run_blocking(move || manager.get_workspace_profile()).await?)
+    } else {
+        None
+    };
+
+    let model = req
+        .model
+        .and_then(normalize_non_empty)
+        .or_else(|| profile.as_ref().map(|v| v.default_model.clone()))
+        .ok_or_else(|| ApiError::bad_request("model is required"))?;
+    let system = req
+        .system
+        .or_else(|| profile.as_ref().map(|v| v.system_prompt.clone()));
+    let context_injection = req
+        .context_injection
+        .or_else(|| profile.as_ref().map(|v| v.context_injection.clone()));
+    let personalization = req
+        .personalization
+        .or_else(|| profile.as_ref().map(|v| v.personalization.clone()));
+
+    // Store user message
+    let user_message_content = req.message.clone();
+    let conversation_id = id.clone();
+    let manager = state.db_manager.clone();
+    let user_message: MessageRecord =
+        run_blocking(move || manager.add_message(&conversation_id, "user", &user_message_content))
+            .await?;
+
+    // Build prompt from history
+    let history_limit = req.history_limit.unwrap_or(40).clamp(1, 500);
+    let conversation_id = id.clone();
+    let manager = state.db_manager.clone();
+    let history =
+        run_blocking(move || manager.list_messages(&conversation_id, history_limit)).await?;
+
+    let prompt_messages: Vec<OrchestratorChatMessage> = history
+        .iter()
+        .map(|m| OrchestratorChatMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        })
+        .collect();
+    let prompt = build_prompt(system.clone(), context_injection, personalization, &prompt_messages);
+
+    // Resolve endpoint
+    let manager = state.db_manager.clone();
+    let fallback_ollama_url = (*state.default_ollama_url).clone();
+    let endpoint_id = req.ollama_endpoint_id;
+    let endpoint = run_blocking(move || {
+        manager.resolve_ollama_endpoint(endpoint_id.as_deref(), &fallback_ollama_url)
+    })
+    .await?;
+
+    let resolved_endpoint_id = endpoint.id.clone();
+    let base_url = endpoint.base_url;
+    let auth_token = endpoint.auth_token;
+
+    // Send initial metadata event with user_message info, then stream tokens
+    let ollama_stream = ollama_generate_stream(
+        &base_url,
+        &model,
+        &prompt,
+        system,
+        auth_token.as_deref(),
+    )
+    .await
+    .map_err(|e| ApiError::internal(e))?;
+
+    let conv_id = id.clone();
+    let db = state.db_manager.clone();
+    let user_message_json =
+        serde_json::to_value(&user_message).map_err(|e: serde_json::Error| ApiError::internal(e))?;
+    let sse_stream = async_stream::stream! {
+        // Emit metadata event first
+        let meta = serde_json::json!({
+            "conversation_id": conv_id,
+            "ollama_endpoint_id": resolved_endpoint_id,
+            "user_message": user_message_json,
+            "model": model,
+        });
+        yield Ok::<Event, std::convert::Infallible>(Event::default().event("meta").data(meta.to_string()));
+
+        let mut full_response = String::new();
+        tokio::pin!(ollama_stream);
+
+        while let Some(chunk_result) = ollama_stream.next().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    full_response.push_str(&chunk.response);
+                    let data = serde_json::json!({
+                        "token": chunk.response,
+                        "done": chunk.done,
+                    });
+                    yield Ok::<Event, std::convert::Infallible>(Event::default().event("token").data(data.to_string()));
+
+                    if chunk.done {
+                        let stats = serde_json::json!({
+                            "prompt_eval_count": chunk.prompt_eval_count,
+                            "eval_count": chunk.eval_count,
+                            "total_duration": chunk.total_duration,
+                        });
+                        yield Ok::<Event, std::convert::Infallible>(Event::default().event("stats").data(stats.to_string()));
+                    }
+                }
+                Err(e) => {
+                    let err = serde_json::json!({ "error": e.to_string() });
+                    yield Ok::<Event, std::convert::Infallible>(Event::default().event("error").data(err.to_string()));
+                    return;
+                }
+            }
+        }
+
+        // Store the complete assistant message in DB
+        let content = full_response;
+        let cid = conv_id.clone();
+        let stored = tokio::task::spawn_blocking(move || {
+            db.add_message(&cid, "assistant", &content)
+        }).await;
+
+        match stored {
+            Ok(Ok(msg)) => {
+                let done_data = serde_json::json!({
+                    "assistant_message": msg,
+                });
+                yield Ok::<Event, std::convert::Infallible>(Event::default().event("done").data(done_data.to_string()));
+            }
+            Ok(Err(e)) => {
+                let err = serde_json::json!({ "error": format!("failed to store message: {}", e) });
+                yield Ok::<Event, std::convert::Infallible>(Event::default().event("error").data(err.to_string()));
+            }
+            Err(e) => {
+                let err = serde_json::json!({ "error": format!("task join error: {}", e) });
+                yield Ok::<Event, std::convert::Infallible>(Event::default().event("error").data(err.to_string()));
+            }
+        }
+    };
+
+    Ok(Sse::new(sse_stream).keep_alive(KeepAlive::default()))
 }
 
 fn build_prompt(
