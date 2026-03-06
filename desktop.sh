@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")"
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT_DIR"
 
 # Install root deps (tauri cli)
 if [ ! -d node_modules ]; then
@@ -19,7 +20,7 @@ fi
 if curl -sf http://127.0.0.1:8787/healthz &>/dev/null; then
   echo "✓ BoB API detected at http://127.0.0.1:8787"
 else
-  echo "⚠ BoB API not running. Start it first with ./start.sh"
+  echo "⚠ BoB API not running. Start it first with ./Server-startup.sh"
   echo "  Launching desktop anyway (configure remote URL in Settings)..."
 fi
 

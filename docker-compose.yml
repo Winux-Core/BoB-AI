@@ -43,7 +43,7 @@ services:
       BOB_ALLOWED_ROOTS: "/data"
       BOB_POLICY_SYNC_FROM_DB: "false"
     ports:
-      - "8787:8787"
+      - "127.0.0.1:8787:8787"
     volumes:
       - bob_data:/data
 

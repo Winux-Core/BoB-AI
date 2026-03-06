@@ -6,8 +6,9 @@ use std::time::Instant;
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 
 use anyhow::Result;
-use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, State};
+use axum::http::header::{self, HeaderName, HeaderValue};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -35,6 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
 use tokio_postgres::NoTls;
 
 #[derive(Parser, Debug)]
@@ -297,6 +299,9 @@ async fn main() -> Result<()> {
              If you intentionally want unauthenticated mode, pass --allow-no-auth."
         );
     }
+    if let Some(value) = token.as_deref() {
+        validate_api_token(value)?;
+    }
     if token.is_none() && !bind_addr.ip().is_loopback() {
         anyhow::bail!(
             "refusing insecure unauthenticated bind on {}. \
@@ -397,7 +402,28 @@ async fn main() -> Result<()> {
             "/conversations/{id}/messages/stream",
             post(reply_conversation_stream),
         )
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .with_state(state)
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("x-permitted-cross-domain-policies"),
+            HeaderValue::from_static("none"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static("geolocation=(), microphone=(), camera=()"),
+        ))
         .layer(cors);
 
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
@@ -1239,6 +1265,18 @@ fn build_prompt(
 }
 
 fn build_cors(origin: &str) -> Result<CorsLayer> {
+    let allow_headers = [
+        header::CONTENT_TYPE,
+        header::AUTHORIZATION,
+        HeaderName::from_static("x-api-key"),
+    ];
+    let allow_methods = [
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::DELETE,
+        Method::OPTIONS,
+    ];
     let layer = if origin == "*" {
         CorsLayer::new().allow_origin(Any)
     } else {
@@ -1247,7 +1285,7 @@ fn build_cors(origin: &str) -> Result<CorsLayer> {
             .map_err(|e| anyhow::anyhow!("invalid CORS origin {}: {}", origin, e))?;
         CorsLayer::new().allow_origin(header_value)
     };
-    Ok(layer.allow_methods(Any).allow_headers(Any))
+    Ok(layer.allow_methods(allow_methods).allow_headers(allow_headers))
 }
 
 fn require_api_auth(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
@@ -1268,9 +1306,22 @@ fn require_api_auth(state: &AppState, headers: &HeaderMap) -> Result<(), ApiErro
         });
 
     match provided {
-        Some(token) if token == *expected => Ok(()),
+        Some(token) if secure_token_eq(&token, expected) => Ok(()),
         _ => Err(ApiError::unauthorized("missing or invalid API token")),
     }
+}
+
+fn secure_token_eq(left: &str, right: &str) -> bool {
+    let left_bytes = left.as_bytes();
+    let right_bytes = right.as_bytes();
+    let max = left_bytes.len().max(right_bytes.len());
+    let mut diff = left_bytes.len() ^ right_bytes.len();
+    for i in 0..max {
+        let l = *left_bytes.get(i).unwrap_or(&0);
+        let r = *right_bytes.get(i).unwrap_or(&0);
+        diff |= (l ^ r) as usize;
+    }
+    diff == 0
 }
 
 async fn authorize_tool(
@@ -1375,6 +1426,22 @@ fn normalize_token(token: String) -> Option<String> {
     } else {
         Some(token)
     }
+}
+
+fn validate_api_token(token: &str) -> Result<()> {
+    if token.len() < 16 {
+        anyhow::bail!("BOB_API_TOKEN must be at least 16 characters.");
+    }
+    let valid = token.chars().all(|c| {
+        c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~')
+    });
+    if !valid {
+        anyhow::bail!(
+            "BOB_API_TOKEN contains unsupported characters. \
+             Use only [A-Za-z0-9._~-] so it can be sent safely in HTTP headers."
+        );
+    }
+    Ok(())
 }
 
 fn normalize_non_empty(value: String) -> Option<String> {

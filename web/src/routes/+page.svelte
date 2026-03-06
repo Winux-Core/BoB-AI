@@ -863,7 +863,9 @@
     display: grid;
     grid-template-columns: 320px minmax(0, 1fr);
     gap: 0.8rem;
-    min-height: calc(100vh - 1.4rem);
+    height: calc(100vh - 1.4rem);
+    max-height: calc(100vh - 1.4rem);
+    overflow: hidden;
   }
 
   .history-rail,
@@ -978,6 +980,7 @@
     display: grid;
     grid-template-rows: auto minmax(0, 1fr) auto;
     overflow: hidden;
+    min-height: 0;
   }
 
   .workspace-top {
@@ -1021,6 +1024,7 @@
     display: grid;
     gap: 0.6rem;
     align-content: start;
+    min-height: 0;
     background:
       radial-gradient(circle at 30% 0%, rgba(41, 74, 112, 0.14), transparent 35%),
       radial-gradient(circle at 80% 90%, rgba(27, 61, 53, 0.15), transparent 42%);
@@ -1114,7 +1118,9 @@
 
   .composer textarea {
     width: 100%;
-    resize: vertical;
+    resize: none;
+    max-height: 180px;
+    overflow: auto;
   }
 
   .composer-actions {
@@ -1364,7 +1370,8 @@
       width: min(100%, calc(100% - 0.8rem));
       margin: 0.4rem auto 0.8rem;
       gap: 0.65rem;
-      min-height: calc(100vh - 0.8rem);
+      height: calc(100vh - 0.8rem);
+      max-height: calc(100vh - 0.8rem);
     }
 
     .history-rail {
@@ -1381,7 +1388,7 @@
     }
 
     .thread {
-      min-height: 42vh;
+      min-height: 0;
     }
   }
 </style>

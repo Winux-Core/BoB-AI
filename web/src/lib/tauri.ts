@@ -135,25 +135,38 @@ export function streamConversationReply(
 
       const decoder = new TextDecoder();
       let buffer = "";
+      let currentEvent = "";
+      let sawDone = false;
+      let emittedError = false;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      const emitErrorOnce = (message: string) => {
+        if (emittedError) {
+          return;
+        }
+        emittedError = true;
+        callbacks.onError(message);
+      };
 
-        buffer += decoder.decode(value, { stream: true });
+      const processBufferedLines = (chunk: string) => {
+        buffer += chunk;
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
 
-        let currentEvent = "";
         for (const line of lines) {
-          if (line.startsWith("event:")) {
-            currentEvent = line.slice(6).trim();
-          } else if (line.startsWith("data:")) {
-            const raw = line.slice(5).trim();
+          const normalized = line.trimEnd();
+          if (normalized.startsWith("event:")) {
+            currentEvent = normalized.slice(6).trim();
+          } else if (normalized.startsWith("data:")) {
+            const eventName = currentEvent;
+            currentEvent = "";
+            if (!eventName) {
+              continue;
+            }
+            const raw = normalized.slice(5).trim();
             if (!raw) continue;
             try {
               const data = JSON.parse(raw);
-              switch (currentEvent) {
+              switch (eventName) {
                 case "meta":
                   callbacks.onMeta(data as StreamMetaEvent);
                   break;
@@ -164,18 +177,39 @@ export function streamConversationReply(
                   callbacks.onStats?.(data as StreamStatsEvent);
                   break;
                 case "done":
+                  sawDone = true;
                   callbacks.onDone(data as StreamDoneEvent);
                   break;
                 case "error":
-                  callbacks.onError(data.error ?? "Unknown stream error");
+                  emitErrorOnce(data.error ?? "Unknown stream error");
                   break;
               }
             } catch {
               // skip unparseable lines
             }
-            currentEvent = "";
           }
         }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (value) {
+          processBufferedLines(decoder.decode(value, { stream: true }));
+        }
+        if (done) {
+          break;
+        }
+      }
+
+      // Flush decoder tail and parse any trailing lines that arrived with stream close.
+      processBufferedLines(decoder.decode());
+      if (buffer.trim()) {
+        // Handle single-line trailing frame without terminal newline.
+        processBufferedLines("\n");
+      }
+
+      if (!sawDone && !controller.signal.aborted && !emittedError) {
+        emitErrorOnce("Stream ended before done event.");
       }
     } catch (err) {
       if ((err as Error).name !== "AbortError") {

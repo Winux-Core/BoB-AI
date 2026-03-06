@@ -1,0 +1,15 @@
+{$BOB_PUBLIC_HOST} {
+  tls {$BOB_TLS_EMAIL}
+  encode zstd gzip
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    X-Content-Type-Options "nosniff"
+    X-Frame-Options "DENY"
+    Referrer-Policy "no-referrer"
+    X-Permitted-Cross-Domain-Policies "none"
+    Permissions-Policy "geolocation=(), microphone=(), camera=()"
+  }
+
+  reverse_proxy bob-api:8787
+}

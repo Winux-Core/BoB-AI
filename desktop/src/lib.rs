@@ -7,6 +7,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+const KEYRING_SERVICE_DEFAULT: &str = "com.bob.desktop";
+const KEYRING_USER_DEFAULT: &str = "api_token";
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct ConversationRecord {
     id: String,
@@ -119,6 +122,20 @@ fn load_local_profile_cmd() -> Result<LocalProfile, String> {
     if let Some(saved) = read_json_file::<GuiSettings>(&gui_settings_path())? {
         profile.settings = saved;
     }
+    let file_token = normalize_optional_token(Some(profile.settings.api_token.clone()));
+    let secure_token = load_api_token_secure()?;
+    profile.settings.api_token = secure_token.unwrap_or_default();
+    if profile.settings.api_token.is_empty() {
+        if let Some(token) = file_token.clone() {
+            save_api_token_secure(Some(&token))?;
+            profile.settings.api_token = token;
+        }
+    }
+    if file_token.is_some() {
+        let mut sanitized = profile.settings.clone();
+        sanitized.api_token = String::new();
+        write_json_file(&gui_settings_path(), &sanitized)?;
+    }
 
     if context_injection_path().exists() {
         profile.context_injection = fs::read_to_string(context_injection_path())
@@ -135,7 +152,12 @@ fn load_local_profile_cmd() -> Result<LocalProfile, String> {
 #[tauri::command]
 fn save_local_profile_cmd(profile: LocalProfile) -> Result<LocalProfile, String> {
     ensure_local_dirs()?;
-    write_json_file(&gui_settings_path(), &profile.settings)?;
+    let token = normalize_optional_token(Some(profile.settings.api_token.clone()));
+    save_api_token_secure(token.as_deref())?;
+
+    let mut persisted_settings = profile.settings.clone();
+    persisted_settings.api_token = String::new();
+    write_json_file(&gui_settings_path(), &persisted_settings)?;
     fs::write(
         context_injection_path(),
         profile.context_injection.as_bytes(),
@@ -409,6 +431,36 @@ fn map_ureq_error(err: ureq::Error) -> String {
         }
         ureq::Error::Transport(err) => format!("API request transport error: {}", err),
     }
+}
+
+fn load_api_token_secure() -> Result<Option<String>, String> {
+    let entry = token_keyring_entry()?;
+    match entry.get_password() {
+        Ok(token) => Ok(normalize_optional_token(Some(token))),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("failed reading API token from keyring: {}", e)),
+    }
+}
+
+fn save_api_token_secure(token: Option<&str>) -> Result<(), String> {
+    let entry = token_keyring_entry()?;
+    match token {
+        Some(value) => entry
+            .set_password(value)
+            .map_err(|e| format!("failed writing API token to keyring: {}", e)),
+        None => match entry.delete_credential() {
+            Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(format!("failed clearing API token in keyring: {}", e)),
+        },
+    }
+}
+
+fn token_keyring_entry() -> Result<keyring::Entry, String> {
+    let service =
+        std::env::var("BOB_KEYRING_SERVICE").unwrap_or_else(|_| KEYRING_SERVICE_DEFAULT.to_string());
+    let user = std::env::var("BOB_KEYRING_USER").unwrap_or_else(|_| KEYRING_USER_DEFAULT.to_string());
+    keyring::Entry::new(&service, &user)
+        .map_err(|e| format!("failed to initialize keyring entry: {}", e))
 }
 
 fn save_cached_chat(cached: &CachedConversation) -> Result<(), String> {
