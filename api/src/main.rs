@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
+
 use anyhow::Result;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -33,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
+use tokio_postgres::NoTls;
 
 #[derive(Parser, Debug)]
 #[command(name = "bob-api")]
@@ -310,7 +313,12 @@ async fn main() -> Result<()> {
     wait_for_postgres("bob-api", &postgres_url, startup_retry)?;
     wait_for_http_health("ollama", &ollama_url, "/api/tags", None, startup_retry)?;
 
-    let migration_summary = apply_migrations(&postgres_url, &cfg.migrations_dir)?;
+    let postgres_url_for_migrations = postgres_url.clone();
+    let migrations_dir = cfg.migrations_dir.clone();
+    let migration_summary = tokio::task::spawn_blocking(move || {
+        apply_migrations(&postgres_url_for_migrations, &migrations_dir)
+    })
+    .await??;
     println!(
         "migrations: applied={} skipped={} total={}",
         migration_summary.applied, migration_summary.skipped, migration_summary.total
@@ -320,7 +328,7 @@ async fn main() -> Result<()> {
         cfg: Arc::new(cfg.clone()),
         permission: Arc::new(RwLock::new(permission_engine)),
         api_token: token.clone(),
-        db_manager: Arc::new(DbManager::new(postgres_url)),
+        db_manager: Arc::new(DbManager::new(create_pg_pool(&postgres_url)?)),
         default_ollama_url: Arc::new(ollama_url),
     };
 
@@ -414,7 +422,7 @@ async fn get_workspace_profile(
     authorize_tool(&state, "workspace.profile.read", None, None).await?;
 
     let manager = state.db_manager.clone();
-    let profile = run_blocking(move || manager.get_workspace_profile()).await?;
+    let profile = manager.get_workspace_profile().await.map_err(ApiError::internal)?;
     Ok(Json(profile))
 }
 
@@ -440,7 +448,10 @@ async fn save_workspace_profile(
     };
 
     let manager = state.db_manager.clone();
-    let profile = run_blocking(move || manager.save_workspace_profile(update)).await?;
+    let profile = manager
+        .save_workspace_profile(update)
+        .await
+        .map_err(ApiError::internal)?;
     Ok(Json(profile))
 }
 
@@ -452,7 +463,10 @@ async fn list_ollama_endpoints(
     authorize_tool(&state, "workspace.ollama.read", None, None).await?;
 
     let manager = state.db_manager.clone();
-    let endpoints = run_blocking(move || manager.list_ollama_endpoints()).await?;
+    let endpoints = manager
+        .list_ollama_endpoints()
+        .await
+        .map_err(ApiError::internal)?;
     Ok(Json(endpoints))
 }
 
@@ -476,7 +490,10 @@ async fn upsert_ollama_endpoint(
     };
 
     let manager = state.db_manager.clone();
-    let endpoint = run_blocking(move || manager.upsert_ollama_endpoint(input)).await?;
+    let endpoint = manager
+        .upsert_ollama_endpoint(input)
+        .await
+        .map_err(ApiError::internal)?;
     Ok(Json(endpoint))
 }
 
@@ -489,7 +506,10 @@ async fn delete_ollama_endpoint(
     authorize_tool(&state, "workspace.ollama.delete", None, None).await?;
 
     let manager = state.db_manager.clone();
-    run_blocking(move || manager.delete_ollama_endpoint(&id)).await?;
+    manager
+        .delete_ollama_endpoint(&id)
+        .await
+        .map_err(ApiError::internal)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -502,7 +522,10 @@ async fn set_default_ollama_endpoint(
     authorize_tool(&state, "workspace.ollama.default", None, None).await?;
 
     let manager = state.db_manager.clone();
-    let endpoint = run_blocking(move || manager.set_default_ollama_endpoint(&id)).await?;
+    let endpoint = manager
+        .set_default_ollama_endpoint(&id)
+        .await
+        .map_err(ApiError::internal)?;
     Ok(Json(endpoint))
 }
 
@@ -515,7 +538,10 @@ async fn test_ollama_endpoint(
     authorize_tool(&state, "workspace.ollama.test", None, None).await?;
 
     let manager = state.db_manager.clone();
-    let endpoint = run_blocking(move || manager.get_ollama_endpoint(&id)).await?;
+    let endpoint = manager
+        .get_ollama_endpoint(&id)
+        .await
+        .map_err(ApiError::internal)?;
 
     let endpoint_id = endpoint.id.clone();
     let endpoint_name = endpoint.name.clone();
@@ -548,10 +574,10 @@ async fn list_ollama_models(
     let manager = state.db_manager.clone();
     let fallback_ollama_url = (*state.default_ollama_url).clone();
     let endpoint_id = query.endpoint_id;
-    let endpoint = run_blocking(move || {
-        manager.resolve_ollama_endpoint(endpoint_id.as_deref(), &fallback_ollama_url)
-    })
-    .await?;
+    let endpoint = manager
+        .resolve_ollama_endpoint(endpoint_id.as_deref(), &fallback_ollama_url)
+        .await
+        .map_err(ApiError::internal)?;
 
     let resolved_endpoint_id = endpoint.id.clone();
     let resolved_endpoint_name = endpoint.name.clone();
@@ -797,7 +823,7 @@ async fn chat_ollama(
 
     let profile = if should_load_profile {
         let manager = state.db_manager.clone();
-        Some(run_blocking(move || manager.get_workspace_profile()).await?)
+        Some(manager.get_workspace_profile().await.map_err(ApiError::internal)?)
     } else {
         None
     };
@@ -820,10 +846,10 @@ async fn chat_ollama(
     let manager = state.db_manager.clone();
     let fallback_ollama_url = (*state.default_ollama_url).clone();
     let endpoint_id = req.ollama_endpoint_id;
-    let endpoint = run_blocking(move || {
-        manager.resolve_ollama_endpoint(endpoint_id.as_deref(), &fallback_ollama_url)
-    })
-    .await?;
+    let endpoint = manager
+        .resolve_ollama_endpoint(endpoint_id.as_deref(), &fallback_ollama_url)
+        .await
+        .map_err(ApiError::internal)?;
 
     let base_url = endpoint.base_url;
     let auth_token = endpoint.auth_token;
@@ -845,7 +871,10 @@ async fn start_conversation(
     let title = req.title;
     let manager = state.db_manager.clone();
     let conversation: ConversationRecord =
-        run_blocking(move || manager.create_conversation(title.as_deref())).await?;
+        manager
+            .create_conversation(title.as_deref())
+            .await
+            .map_err(ApiError::internal)?;
     Ok(Json(conversation))
 }
 
@@ -859,7 +888,10 @@ async fn list_conversations(
 
     let limit = query.limit.unwrap_or(50).clamp(1, 500);
     let manager = state.db_manager.clone();
-    let conversations = run_blocking(move || manager.list_conversations(limit)).await?;
+    let conversations = manager
+        .list_conversations(limit)
+        .await
+        .map_err(ApiError::internal)?;
     Ok(Json(conversations))
 }
 
@@ -874,7 +906,10 @@ async fn get_conversation_messages(
 
     let limit = query.limit.unwrap_or(200).clamp(1, 500);
     let manager = state.db_manager.clone();
-    let messages = run_blocking(move || manager.list_messages(&id, limit)).await?;
+    let messages = manager
+        .list_messages(&id, limit)
+        .await
+        .map_err(ApiError::internal)?;
     Ok(Json(messages))
 }
 
@@ -902,7 +937,7 @@ async fn reply_conversation(
 
     let profile = if should_load_profile {
         let manager = state.db_manager.clone();
-        Some(run_blocking(move || manager.get_workspace_profile()).await?)
+        Some(manager.get_workspace_profile().await.map_err(ApiError::internal)?)
     } else {
         None
     };
@@ -928,14 +963,19 @@ async fn reply_conversation(
     let conversation_id = id.clone();
     let manager = state.db_manager.clone();
     let user_message =
-        run_blocking(move || manager.add_message(&conversation_id, "user", &user_message_content))
-            .await?;
+        manager
+            .add_message(&conversation_id, "user", &user_message_content)
+            .await
+            .map_err(ApiError::internal)?;
 
     let history_limit = req.history_limit.unwrap_or(40).clamp(1, 500);
     let conversation_id = id.clone();
     let manager = state.db_manager.clone();
     let history =
-        run_blocking(move || manager.list_messages(&conversation_id, history_limit)).await?;
+        manager
+            .list_messages(&conversation_id, history_limit)
+            .await
+            .map_err(ApiError::internal)?;
 
     let prompt_messages: Vec<OrchestratorChatMessage> = history
         .iter()
@@ -954,10 +994,10 @@ async fn reply_conversation(
     let manager = state.db_manager.clone();
     let fallback_ollama_url = (*state.default_ollama_url).clone();
     let endpoint_id = req.ollama_endpoint_id;
-    let endpoint = run_blocking(move || {
-        manager.resolve_ollama_endpoint(endpoint_id.as_deref(), &fallback_ollama_url)
-    })
-    .await?;
+    let endpoint = manager
+        .resolve_ollama_endpoint(endpoint_id.as_deref(), &fallback_ollama_url)
+        .await
+        .map_err(ApiError::internal)?;
 
     let resolved_endpoint_id = endpoint.id.clone();
     let base_url = endpoint.base_url;
@@ -970,10 +1010,10 @@ async fn reply_conversation(
     let assistant_content = model_response.response.clone();
     let conversation_id = id.clone();
     let manager = state.db_manager.clone();
-    let assistant_message = run_blocking(move || {
-        manager.add_message(&conversation_id, "assistant", &assistant_content)
-    })
-    .await?;
+    let assistant_message = manager
+        .add_message(&conversation_id, "assistant", &assistant_content)
+        .await
+        .map_err(ApiError::internal)?;
 
     Ok(Json(ConversationReplyResponse {
         conversation_id: id,
@@ -1009,7 +1049,7 @@ async fn reply_conversation_stream(
 
     let profile = if should_load_profile {
         let manager = state.db_manager.clone();
-        Some(run_blocking(move || manager.get_workspace_profile()).await?)
+        Some(manager.get_workspace_profile().await.map_err(ApiError::internal)?)
     } else {
         None
     };
@@ -1034,15 +1074,20 @@ async fn reply_conversation_stream(
     let conversation_id = id.clone();
     let manager = state.db_manager.clone();
     let user_message: MessageRecord =
-        run_blocking(move || manager.add_message(&conversation_id, "user", &user_message_content))
-            .await?;
+        manager
+            .add_message(&conversation_id, "user", &user_message_content)
+            .await
+            .map_err(ApiError::internal)?;
 
     // Build prompt from history
     let history_limit = req.history_limit.unwrap_or(40).clamp(1, 500);
     let conversation_id = id.clone();
     let manager = state.db_manager.clone();
     let history =
-        run_blocking(move || manager.list_messages(&conversation_id, history_limit)).await?;
+        manager
+            .list_messages(&conversation_id, history_limit)
+            .await
+            .map_err(ApiError::internal)?;
 
     let prompt_messages: Vec<OrchestratorChatMessage> = history
         .iter()
@@ -1057,10 +1102,10 @@ async fn reply_conversation_stream(
     let manager = state.db_manager.clone();
     let fallback_ollama_url = (*state.default_ollama_url).clone();
     let endpoint_id = req.ollama_endpoint_id;
-    let endpoint = run_blocking(move || {
-        manager.resolve_ollama_endpoint(endpoint_id.as_deref(), &fallback_ollama_url)
-    })
-    .await?;
+    let endpoint = manager
+        .resolve_ollama_endpoint(endpoint_id.as_deref(), &fallback_ollama_url)
+        .await
+        .map_err(ApiError::internal)?;
 
     let resolved_endpoint_id = endpoint.id.clone();
     let base_url = endpoint.base_url;
@@ -1124,23 +1169,19 @@ async fn reply_conversation_stream(
         // Store the complete assistant message in DB
         let content = full_response;
         let cid = conv_id.clone();
-        let stored = tokio::task::spawn_blocking(move || {
-            db.add_message(&cid, "assistant", &content)
-        }).await;
+        let stored = db
+            .add_message(&cid, "assistant", &content)
+            .await;
 
         match stored {
-            Ok(Ok(msg)) => {
+            Ok(msg) => {
                 let done_data = serde_json::json!({
                     "assistant_message": msg,
                 });
                 yield Ok::<Event, std::convert::Infallible>(Event::default().event("done").data(done_data.to_string()));
             }
-            Ok(Err(e)) => {
-                let err = serde_json::json!({ "error": format!("failed to store message: {}", e) });
-                yield Ok::<Event, std::convert::Infallible>(Event::default().event("error").data(err.to_string()));
-            }
             Err(e) => {
-                let err = serde_json::json!({ "error": format!("task join error: {}", e) });
+                let err = serde_json::json!({ "error": format!("failed to store message: {}", e) });
                 yield Ok::<Event, std::convert::Infallible>(Event::default().event("error").data(err.to_string()));
             }
         }
@@ -1251,6 +1292,15 @@ where
         .await
         .map_err(ApiError::internal)?
         .map_err(ApiError::internal)
+}
+
+fn create_pg_pool(postgres_url: &str) -> anyhow::Result<Pool> {
+    let cfg = postgres_url.parse::<tokio_postgres::Config>()?;
+    let mgr_config = ManagerConfig {
+        recycling_method: RecyclingMethod::Fast,
+    };
+    let manager = Manager::from_config(cfg, NoTls, mgr_config);
+    Ok(Pool::builder(manager).max_size(16).build()?)
 }
 
 fn default_iterations() -> u32 {
