@@ -3,6 +3,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Ensure required env file exists for secure defaults
+if [ ! -f .env ]; then
+  echo "Missing .env file."
+  echo "Create one from .env.example and set BOB_API_TOKEN + BOB_API_CORS_ORIGIN."
+  exit 1
+fi
+
 # Ensure podman socket is running
 if ! systemctl --user is-active podman.socket &>/dev/null; then
   echo "Starting podman socket..."
@@ -23,8 +30,7 @@ for i in $(seq 1 30); do
     kill $LOG_PID 2>/dev/null || true
     echo ""
     echo "✓ BoB API ready at http://127.0.0.1:8787"
-    echo "✓ Ollama at http://127.0.0.1:11434"
-    echo "✓ Postgres at localhost:5432"
+    echo "✓ Ollama and Postgres are internal-only (not host-exposed)"
     echo ""
     echo "Stop with: docker compose down"
     exit 0

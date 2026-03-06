@@ -47,6 +47,8 @@ struct ApiCli {
     token: Option<String>,
     #[arg(long, default_value_t = false)]
     allow_no_auth: bool,
+    #[arg(long, env = "BOB_API_ALLOW_INSECURE_CORS", default_value_t = false)]
+    allow_insecure_cors: bool,
     #[arg(long, env = "BOB_API_CORS_ORIGIN", default_value = "*")]
     cors_origin: String,
 }
@@ -279,6 +281,10 @@ async fn main() -> Result<()> {
     let cli = ApiCli::parse();
     let cfg = BobConfig::from_env();
     let startup_retry = RetryConfig::startup();
+    let bind_addr: SocketAddr = cli
+        .bind
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid bind address {}: {}", cli.bind, e))?;
     let token = cli.token.and_then(normalize_token).or_else(|| {
         std::env::var("BOB_API_TOKEN")
             .ok()
@@ -289,6 +295,20 @@ async fn main() -> Result<()> {
         anyhow::bail!(
             "no API token configured. Set BOB_API_TOKEN or pass --token. \
              If you intentionally want unauthenticated mode, pass --allow-no-auth."
+        );
+    }
+    if token.is_none() && !bind_addr.ip().is_loopback() {
+        anyhow::bail!(
+            "refusing insecure unauthenticated bind on {}. \
+             Use a loopback bind (127.0.0.1/::1), configure BOB_API_TOKEN, \
+             or explicitly opt into risk with a secure network boundary.",
+            bind_addr
+        );
+    }
+    if token.is_some() && cli.cors_origin == "*" && !cli.allow_insecure_cors {
+        anyhow::bail!(
+            "refusing wildcard CORS while auth is enabled. \
+             Set BOB_API_CORS_ORIGIN to an explicit origin or pass --allow-insecure-cors."
         );
     }
 
@@ -380,10 +400,6 @@ async fn main() -> Result<()> {
         .with_state(state)
         .layer(cors);
 
-    let bind_addr: SocketAddr = cli
-        .bind
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid bind address {}: {}", cli.bind, e))?;
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     println!(
         "bob-api listening on http://{} auth={} cors_origin={} mode=unified",
