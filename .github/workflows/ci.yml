@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  shell-and-build:
+    runs-on: ubuntu-latest
+    env:
+      BOB_API_TOKEN: ci_token_0123456789abcdef0123456789abcdef
+      BOB_API_CORS_ORIGIN: http://localhost:5173
+      BOB_PUBLIC_HOST: bob.example.com
+      BOB_TLS_EMAIL: ops@example.com
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry/target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Create CI .env
+        run: |
+          cat > .env <<EOF
+          BOB_API_TOKEN=${BOB_API_TOKEN}
+          BOB_API_CORS_ORIGIN=${BOB_API_CORS_ORIGIN}
+          BOB_PUBLIC_HOST=${BOB_PUBLIC_HOST}
+          BOB_TLS_EMAIL=${BOB_TLS_EMAIL}
+          EOF
+
+      - name: Script syntax check
+        run: |
+          bash -n Server-startup.sh Server-shutdown.sh desktop.sh validate.sh build.sh test.sh key.sh start.sh
+
+      - name: Build via project script
+        run: ./build.sh
+
+      - name: Rust checks
+        run: cargo check --workspace
+
+      - name: Web build check
+        run: npm run --prefix web build
+
+      - name: Start services and validate API
+        run: |
+          ./Server-startup.sh
+          ./validate.sh
+
+      - name: Show compose status/logs on failure
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs --tail=300
+
+      - name: Shutdown services
+        if: always()
+        run: ./Server-shutdown.sh

@@ -10,10 +10,12 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-if command -v systemctl >/dev/null 2>&1; then
+if command -v podman >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
   if ! systemctl --user is-active podman.socket >/dev/null 2>&1; then
     echo "Starting podman socket..."
-    systemctl --user start podman.socket
+    if ! systemctl --user start podman.socket >/dev/null 2>&1; then
+      echo "Warning: could not start podman.socket via systemctl --user; continuing."
+    fi
   fi
 fi
 
