@@ -2,6 +2,12 @@
   "name": "bob",
   "private": true,
   "scripts": {
+    "bob:start": "node ./scripts/bob.mjs start",
+    "bob:stop": "node ./scripts/bob.mjs stop",
+    "bob:build": "node ./scripts/bob.mjs build",
+    "bob:validate": "node ./scripts/bob.mjs validate",
+    "bob:test": "node ./scripts/bob.mjs test",
+    "bob:desktop": "node ./scripts/bob.mjs desktop",
     "dev": "npm run --prefix web dev",
     "build": "npm run --prefix web build",
     "preview": "npm run --prefix web preview",

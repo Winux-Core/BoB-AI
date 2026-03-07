@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-INPUT_FILE="${1:-$ROOT_DIR/key.txt}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+INPUT_FILE="${1:-$PROJECT_ROOT/key.txt}"
 
 if [ ! -f "$INPUT_FILE" ]; then
   echo "Input file not found: $INPUT_FILE"
-  echo "Usage: ./key.sh [path/to/key.txt]"
+  echo "Usage: ./scripts/key.sh [path/to/key.txt]"
   exit 1
 fi
 
